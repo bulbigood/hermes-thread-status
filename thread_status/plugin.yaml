@@ -1,3 +1,8 @@
 name: thread-status
-version: "0.1.0"
-description: Observe Hermes turn status per conversation topic (preview).
+version: "0.2.0"
+description: Show foreground turn status in allowlisted Telegram topic icons.
+provides_hooks:
+  - pre_llm_call
+  - on_human_input_request
+  - on_human_input_resolved
+  - on_session_end

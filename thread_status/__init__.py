@@ -1,4 +1,4 @@
-"""Hermes entry point. Preview does not access the bot, or touch any chat."""
+"""Hermes entry point. Delivery is opt-in and limited to configured topics."""
 import logging
 from threading import RLock
 
@@ -53,4 +53,7 @@ def bind(ctx, route=current_topic, publish=preview):
 
 
 def register(ctx):
-    bind(ctx)
+    from hermes_constants import get_hermes_home
+    from .live import configured
+    delivery = configured(get_hermes_home())
+    bind(ctx, publish=delivery or preview)
