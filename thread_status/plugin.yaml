@@ -1,5 +1,5 @@
 name: thread-status
-version: "0.2.0"
+version: "0.3.0"
 description: Show foreground turn status in allowlisted Telegram topic icons.
 provides_hooks:
   - pre_llm_call

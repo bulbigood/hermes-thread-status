@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from threading import Thread, Lock
 from time import sleep
 from urllib.error import HTTPError
@@ -50,9 +51,31 @@ class Bot:
         return result.get('ok') is True and result.get('result') is True
 
 
+@dataclass(frozen=True)
+class TopicScope:
+    profile: str
+    chat: str
+    threads: frozenset | None  # None means explicitly opted in to all topics.
+
+    @classmethod
+    def from_config(cls, live):
+        value = live['threads']
+        if value != '*' and not isinstance(value, list):
+            raise ValueError('threads must be a list of topic IDs or "*"')
+        return cls(live['profile'], str(live['chat_id']),
+                   None if value == '*' else frozenset(map(str, value)))
+
+    def __contains__(self, topic):
+        return (isinstance(topic, Topic) and topic.platform == 'telegram'
+                and topic.profile == self.profile and topic.chat == self.chat
+                and topic.thread.isascii() and topic.thread.isdecimal() and int(topic.thread) > 0
+                and not (self.chat.startswith('-') and int(topic.thread) == 1)
+                and (self.threads is None or topic.thread in self.threads))
+
+
 class Delivery:
     def __init__(self, allowed, bot):
-        self.allowed, self.bot = frozenset(allowed), bot
+        self.allowed, self.bot = allowed, bot
         self.lock, self.pending, self.running = Lock(), {}, False
 
     def __call__(self, topic, state):
@@ -97,5 +120,4 @@ def configured(home):
     token = dotenv_values(home / '.env', interpolate=False).get('TELEGRAM_BOT_TOKEN', '')
     if not token or token.partition(':')[0] != str(live['bot_id']):
         raise ValueError('bot identity mismatch')
-    allowed = {Topic(live['profile'], 'telegram', str(live['chat_id']), str(t)) for t in live['threads']}
-    return Delivery(allowed, Bot(token))
+    return Delivery(TopicScope.from_config(live), Bot(token))

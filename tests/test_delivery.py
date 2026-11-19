@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from urllib.error import HTTPError
 
 from thread_status.core import State, Topic
-from thread_status.live import Bot, Delivery, ICONS, Retry
+from thread_status.live import Bot, Delivery, ICONS, Retry, TopicScope
 
 
 class DeliveryTests(unittest.TestCase):
@@ -35,6 +35,25 @@ class DeliveryTests(unittest.TestCase):
         self.delivery._drain()
         self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=12,
                                                           icon_custom_emoji_id=ICONS[State.DONE])
+
+    def test_new_topic_accepted_only_in_selected_chat_profile_and_platform(self):
+        scope = TopicScope.from_config(dict(profile='profile', chat_id=123, threads='*'))
+        delivery = Delivery(scope, self.bot)
+        for topic in (Topic('other', 'telegram', '123', '87'), Topic('profile', 'telegram', '124', '87'),
+                      Topic('profile', 'discord', '123', '87'), Topic('profile', 'telegram', '123', '')):
+            delivery(topic, State.WORKING)
+        self.thread.assert_not_called()
+        delivery(Topic('profile', 'telegram', '123', '87'), State.WORKING)
+        delivery._drain()
+        self.bot.edit_forum_topic.assert_awaited_once_with(chat_id=123, message_thread_id=87,
+                                                          icon_custom_emoji_id=ICONS[State.WORKING])
+
+    def test_only_explicit_wildcard_broadens_scope(self):
+        for value, expected in (([12], True), ([13], False), ([], False), (['*'], False)):
+            scope = TopicScope.from_config(dict(profile='profile', chat_id=123, threads=value))
+            self.assertEqual(self.topic in scope, expected)
+        with self.assertRaises(ValueError):
+            TopicScope.from_config(dict(profile='profile', chat_id=123, threads=None))
 
     def test_retry_does_not_overwrite_new_state(self):
         self.bot.edit_forum_topic.side_effect = [Retry(1), True]
