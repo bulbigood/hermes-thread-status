@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from http.client import IncompleteRead
 from threading import Thread, Lock
 from time import sleep
 from urllib.error import HTTPError
@@ -25,7 +26,17 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class Retry(Exception):
-    pass
+    def __init__(self, delay=None, *, reason='transient'):
+        super().__init__(delay)
+        self.delay, self.reason = delay, reason
+
+
+class Rejected(Exception):
+    """Only numeric status codes are safe to log (URLs can contain the bot token)."""
+
+
+UNCHANGED = 'not_modified'
+MAX_ATTEMPTS = 3
 
 
 class Bot:
@@ -36,19 +47,37 @@ class Bot:
         # Only called by the dedicated delivery thread, never the gateway loop.
         req = Request(self._url, data=json.dumps(payload).encode(),
                       headers={'Content-Type': 'application/json'})
+        status = 200
         try:
             with build_opener(NoRedirect()).open(req, timeout=8) as response:
                 result = json.load(response)
         except HTTPError as err:
             with err:
-                if err.code >= 500:
-                    raise Retry(2) from None
-                result = json.load(err)
-        if result.get('error_code') == 429:
-            raise Retry(max(1, int(result.get('parameters', {}).get('retry_after', 2))))
-        if 'TOPIC_NOT_MODIFIED' in result.get('description', '').upper():
+                status = err.code
+                if status == 408 or 500 <= status < 600:
+                    raise Retry(reason=f'http_{status}') from None
+                try:
+                    result = json.load(err)
+                except ValueError:
+                    result = {}
+        except ValueError:
+            raise Retry(reason='invalid_response') from None
+        if not isinstance(result, dict):
+            result = {}
+        code = result.get('error_code', status)
+        if code == 429 or status == 429:
+            params = result.get('parameters')
+            delay = params.get('retry_after') if isinstance(params, dict) else None
+            raise Retry(delay if type(delay) is int and delay > 0 else 2, reason='rate_limit')
+        if code == 408 or isinstance(code, int) and 500 <= code < 600:
+            raise Retry(reason=f'http_{code}')
+        if code == 400 and 'TOPIC_NOT_MODIFIED' in str(result.get('description', '')).upper():
+            return UNCHANGED
+        if status == 200 and result.get('ok') is True and result.get('result') is True:
             return True
-        return result.get('ok') is True and result.get('result') is True
+        if code == 200:
+            raise Retry(reason='invalid_response')
+        raise Rejected(code if isinstance(code, int) else status)
 
 
 @dataclass(frozen=True)
@@ -96,16 +125,25 @@ class Delivery:
                 topic = next(iter(self.pending))
                 state, attempt = self.pending.pop(topic)
             try:
-                ok = asyncio.run(render(self.bot, topic, state, allowed=self.allowed, icons=ICONS))
-                LOG.log(logging.INFO if ok else logging.WARNING,
-                        'thread-status %s topic=%s state=%s', 'accepted' if ok else 'rejected', topic.thread, state.value)
-            except (Retry, OSError) as exc:
-                delay = int(exc.args[0]) if isinstance(exc, Retry) else 2 ** (attempt + 1)
-                LOG.warning('thread-status retry topic=%s delay=%s', topic.thread, delay)
+                result = asyncio.run(render(self.bot, topic, state, allowed=self.allowed, icons=ICONS))
+                outcome = UNCHANGED if result == UNCHANGED else ('api_ok' if result is True else 'skipped')
+                LOG.info('thread-status %s topic=%s state=%s attempt=%s', outcome, topic.thread, state.value, attempt + 1)
+            except Rejected as exc:
+                LOG.warning('thread-status rejected topic=%s state=%s code=%s', topic.thread, state.value, exc.args[0])
+            except (Retry, OSError, IncompleteRead) as exc:
+                reason = exc.reason if isinstance(exc, Retry) else type(exc).__name__
+                delay = exc.delay if isinstance(exc, Retry) and exc.delay is not None else 2 ** attempt
+                if attempt + 1 >= MAX_ATTEMPTS:
+                    LOG.warning('thread-status exhausted topic=%s state=%s attempts=%s reason=%s',
+                                topic.thread, state.value, MAX_ATTEMPTS, reason)
+                    if reason == 'rate_limit':  # Also protect the next queued edit.
+                        sleep(delay)
+                    continue
+                LOG.warning('thread-status retry topic=%s state=%s attempt=%s delay=%s reason=%s',
+                            topic.thread, state.value, attempt + 2, delay, reason)
                 sleep(delay)
-                if attempt < 2:
-                    with self.lock:
-                        self.pending.setdefault(topic, (state, attempt + 1))
+                with self.lock:
+                    self.pending.setdefault(topic, (state, attempt + 1))
             except Exception as exc:
                 LOG.warning('thread-status delivery failed: %s', type(exc).__name__)  # never log token-bearing URLs
 
