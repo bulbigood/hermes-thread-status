@@ -1,5 +1,6 @@
 """Frontend-independent state machine. Callers serialize updates and delivery."""
 from dataclasses import dataclass, field
+from collections import deque
 from enum import Enum
 
 
@@ -37,17 +38,27 @@ class Turn:
 class Tracker:
     def __init__(self):
         self.active = {}
-        self.superseded = {}
+        # Bound transient history; a late hook can arrive even when no turn
+        # from the retired session had reached pre_llm_call yet.
+        self.retired = deque(maxlen=1024)
+        self.seen = deque(maxlen=1024)
 
-    def fresh(self, topic):
-        previous = self.active.pop(topic, None)
-        if previous:
-            self.superseded[topic] = previous.owner
+    def fresh(self, topic, session, old_session=None):
+        key = (topic, session)
+        if old_session and old_session != session:
+            self.retired.append((topic, old_session))
+        if key in self.retired or key in self.seen:
+            return None
+        self.seen.append(key)
+        self.active.pop(topic, None)
         return State.FRESH
 
     def start(self, topic, owner):
-        if self.superseded.get(topic) == owner:
+        key = (topic, owner[0])
+        if key in self.retired:
             return None
+        if key not in self.seen:
+            self.seen.append(key)
         current = self.active.get(topic)
         if current and current.owner == owner:
             return None

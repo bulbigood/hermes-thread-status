@@ -62,6 +62,17 @@ class Events(unittest.TestCase):
         self.fire('pre_llm_call', turn_id='a')
         self.fire('on_session_end', turn_id='a', completed=True)
         self.assertEqual(self.seen, [State.FRESH, State.WORKING, State.DONE])
+        self.fire('on_session_start')  # Rebuilding the prompt is not a new session.
+        self.assertEqual(self.seen[-1], State.DONE)
+
+    def test_reset_before_old_first_turn_fences_even_late_session_start(self):
+        self.hooks['on_session_reset'](platform='telegram', session_id='new', old_session_id='s')
+        self.fire('on_session_start')
+        self.fire('pre_llm_call', turn_id='late')
+        self.fire('on_session_end', turn_id='late', interrupted=True)
+        self.hooks['on_session_start'](platform='telegram', session_id='new')
+        self.hooks['pre_llm_call'](platform='telegram', session_id='new', turn_id='next')
+        self.assertEqual(self.seen, [State.FRESH, State.WORKING])
 
     def test_reset_without_matching_topic_is_ignored(self):
         self.reset_route.return_value = None

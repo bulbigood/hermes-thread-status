@@ -25,9 +25,9 @@ def preview(topic, state):
 def reset_topic(platform, session):
     # /new runs outside a turn: its ContextVars may be empty or stale. Hermes
     # persists the replacement route before emitting on_session_reset.
-    from hermes_constants import get_hermes_home, profile_name_for_home
+    from hermes_constants import get_routing_process_hermes_home, profile_name_for_home
     from hermes_state_registry import acquire, release
-    home = get_hermes_home()
+    home = get_routing_process_hermes_home()
     db = acquire(home / 'state.db')
     try:
         entry = db.gateway_routing_entry_for_session(session)
@@ -50,7 +50,8 @@ def bind(ctx, route=current_topic, publish=preview, reset_route=reset_topic):
 
     def observe(event):
         def hook(*, session_id='', platform='', turn_id='', parent_session_id='',
-                 kind='', request_id='', completed=False, interrupted=False, failed=False, **unused):
+                 kind='', request_id='', completed=False, interrupted=False, failed=False,
+                 old_session_id='', **unused):
             if parent_session_id or not session_id:
                 return
             boundary = event in ('on_session_reset', 'on_session_start')
@@ -62,7 +63,7 @@ def bind(ctx, route=current_topic, publish=preview, reset_route=reset_topic):
             with lock:
                 owner = (session_id, turn_id)
                 if boundary:
-                    state = tracker.fresh(topic)
+                    state = tracker.fresh(topic, session_id, old_session_id if event == 'on_session_reset' else None)
                 elif event == 'pre_llm_call' and turn_id:
                     state = tracker.start(topic, owner)
                 elif event == 'on_session_end' and turn_id:
