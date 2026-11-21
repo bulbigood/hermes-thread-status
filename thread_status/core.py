@@ -4,6 +4,7 @@ from enum import Enum
 
 
 class State(str, Enum):
+    FRESH = "fresh"
     WORKING = "working"
     ANSWER = "needs_answer"
     APPROVAL = "needs_approval"
@@ -36,8 +37,17 @@ class Turn:
 class Tracker:
     def __init__(self):
         self.active = {}
+        self.superseded = {}
+
+    def fresh(self, topic):
+        previous = self.active.pop(topic, None)
+        if previous:
+            self.superseded[topic] = previous.owner
+        return State.FRESH
 
     def start(self, topic, owner):
+        if self.superseded.get(topic) == owner:
+            return None
         current = self.active.get(topic)
         if current and current.owner == owner:
             return None

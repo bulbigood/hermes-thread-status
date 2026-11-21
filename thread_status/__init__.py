@@ -22,7 +22,30 @@ def preview(topic, state):
                                     topic.platform, topic.chat, topic.thread, state.value)
 
 
-def bind(ctx, route=current_topic, publish=preview):
+def reset_topic(platform, session):
+    # /new runs outside a turn: its ContextVars may be empty or stale. Hermes
+    # persists the replacement route before emitting on_session_reset.
+    from hermes_constants import get_hermes_home, profile_name_for_home
+    from hermes_state_registry import acquire, release
+    home = get_hermes_home()
+    db = acquire(home / 'state.db')
+    try:
+        entry = db.gateway_routing_entry_for_session(session)
+    finally:
+        release(db)
+    if not entry or entry.get('suspended'):
+        return None
+    origin = entry.get('origin') or {}
+    profile = origin.get('profile') or profile_name_for_home(home)
+    if entry.get('transport_profile') not in (None, profile):
+        return None  # Do not use a different profile's bot for this route.
+    chat, thread = origin.get('chat_id'), origin.get('thread_id')
+    if not profile or origin.get('platform') != platform or not chat or not thread:
+        return None
+    return Topic(profile, platform, str(chat), str(thread))
+
+
+def bind(ctx, route=current_topic, publish=preview, reset_route=reset_topic):
     tracker, lock = Tracker(), RLock()
 
     def observe(event):
@@ -30,12 +53,17 @@ def bind(ctx, route=current_topic, publish=preview):
                  kind='', request_id='', completed=False, interrupted=False, failed=False, **unused):
             if parent_session_id or not session_id:
                 return
-            topic = route(platform, session_id)
+            boundary = event in ('on_session_reset', 'on_session_start')
+            if boundary and platform != 'telegram':
+                return
+            topic = (reset_route if event == 'on_session_reset' else route)(platform, session_id)
             if not topic:
                 return
             with lock:
                 owner = (session_id, turn_id)
-                if event == 'pre_llm_call' and turn_id:
+                if boundary:
+                    state = tracker.fresh(topic)
+                elif event == 'pre_llm_call' and turn_id:
                     state = tracker.start(topic, owner)
                 elif event == 'on_session_end' and turn_id:
                     state = tracker.finish(topic, owner, completed, interrupted, failed)
@@ -48,7 +76,8 @@ def bind(ctx, route=current_topic, publish=preview):
                     publish(topic, state)  # Local and non-networking; do not block hook dispatch.
         return hook
 
-    for event in ('pre_llm_call', 'on_human_input_request', 'on_human_input_resolved', 'on_session_end'):
+    for event in ('on_session_reset', 'on_session_start', 'pre_llm_call',
+                  'on_human_input_request', 'on_human_input_resolved', 'on_session_end'):
         ctx.register_hook(event, observe(event))
 
 
